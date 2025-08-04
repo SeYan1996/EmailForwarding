@@ -1,0 +1,18 @@
+# 数据库配置
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=your_password
+DB_NAME=email_forwarding
+
+# Gmail配置
+GMAIL_CREDENTIALS_FILE=credentials.json
+GMAIL_TOKEN_FILE=token.json
+GMAIL_USER_EMAIL=your-email@gmail.com
+
+# 服务器配置
+SERVER_PORT=8080
+GIN_MODE=debug
+
+# 应用配置
+CHECK_INTERVAL=5m
