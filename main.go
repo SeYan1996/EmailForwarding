@@ -36,6 +36,10 @@ func main() {
 		logger.Errorf("创建默认转发目标失败: %v", err)
 	}
 
+	// 设置代理（如果需要）
+	// 在这里设置您的代理地址，例如：
+	services.SetProxy("http://127.0.0.1:10810")  // 本地代理
+	
 	// 初始化Gmail服务
 	gmailService, err := services.NewGmailService(
 		cfg.Gmail.CredentialsFile,

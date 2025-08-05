@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -18,26 +19,76 @@ import (
 	"google.golang.org/api/option"
 )
 
+// 全局代理配置
+var (
+	ProxyURL string = "http://127.0.0.1:10810" // 在这里设置您的代理地址，例如: "http://127.0.0.1:7890"
+)
+
 type GmailService struct {
 	service   *gmail.Service
 	userEmail string
 }
 
+// SetProxy 设置代理地址
+func SetProxy(proxyURL string) {
+	ProxyURL = proxyURL
+	log.Printf("已设置代理: %s", proxyURL)
+}
+
 // NewGmailService 创建Gmail服务实例
 func NewGmailService(credentialsFile, tokenFile, userEmail string) (*GmailService, error) {
+	// 检查凭据文件是否存在
+	if _, err := os.Stat(credentialsFile); os.IsNotExist(err) {
+		return nil, fmt.Errorf("Gmail凭据文件不存在: %s\n请按照以下步骤获取凭据：\n1. 访问 https://console.cloud.google.com/\n2. 创建OAuth 2.0客户端ID（桌面应用）\n3. 下载JSON文件并重命名为 credentials.json", credentialsFile)
+	}
+
 	b, err := ioutil.ReadFile(credentialsFile)
 	if err != nil {
 		return nil, fmt.Errorf("无法读取凭证文件: %v", err)
 	}
 
+	// 解析OAuth 2.0配置
 	config, err := google.ConfigFromJSON(b, gmail.GmailReadonlyScope, gmail.GmailSendScope)
 	if err != nil {
-		return nil, fmt.Errorf("无法解析凭证文件: %v", err)
+		return nil, fmt.Errorf("无法解析OAuth 2.0配置: %v\n请确保下载的是OAuth 2.0客户端ID，而不是API密钥", err)
 	}
 
-	client := getClient(config, tokenFile)
-
-	srv, err := gmail.NewService(context.Background(), option.WithHTTPClient(client))
+	// 获取OAuth2 token
+	tok, err := tokenFromFile(tokenFile)
+	if err != nil {
+		// 创建支持代理的HTTP客户端用于token获取
+		proxyClient := createHTTPClientWithProxy()
+		tok = getTokenFromWeb(config, proxyClient)
+		saveToken(tokenFile, tok)
+	} else {
+		// 检查token是否有效，如果无效则重新获取
+		if !isTokenValid(tok) {
+			log.Printf("Token已过期，重新获取...")
+			proxyClient := createHTTPClientWithProxy()
+			tok = getTokenFromWeb(config, proxyClient)
+			saveToken(tokenFile, tok)
+		}
+	}
+	
+	// 创建支持代理的HTTP客户端
+	proxyClient := createHTTPClientWithProxy()
+	
+	// 创建OAuth2客户端，并确保代理配置正确应用
+	var oauthClient *http.Client
+	if proxyClient.Transport != nil {
+		// 如果设置了代理，创建一个新的Transport，同时保持OAuth2认证
+		oauthClient = &http.Client{
+			Transport: &oauth2.Transport{
+				Base:   proxyClient.Transport,
+				Source: config.TokenSource(context.Background(), tok),
+			},
+		}
+	} else {
+		// 如果没有代理，使用标准的OAuth2客户端
+		oauthClient = config.Client(context.Background(), tok)
+	}
+	
+	srv, err := gmail.NewService(context.Background(), option.WithHTTPClient(oauthClient))
 	if err != nil {
 		return nil, fmt.Errorf("无法创建Gmail服务: %v", err)
 	}
@@ -48,18 +99,65 @@ func NewGmailService(credentialsFile, tokenFile, userEmail string) (*GmailServic
 	}, nil
 }
 
-// getClient 获取OAuth2客户端
-func getClient(config *oauth2.Config, tokFile string) *http.Client {
-	tok, err := tokenFromFile(tokFile)
-	if err != nil {
-		tok = getTokenFromWeb(config)
-		saveToken(tokFile, tok)
+
+
+// createHTTPClientWithProxy 创建支持代理的HTTP客户端
+func createHTTPClientWithProxy() *http.Client {
+	client := &http.Client{
+		Timeout: 30 * time.Second,
 	}
-	return config.Client(context.Background(), tok)
+	
+	// 优先使用代码中设置的代理
+	if ProxyURL != "" {
+		proxyURL, err := url.Parse(ProxyURL)
+		if err != nil {
+			log.Printf("警告: 无法解析代理URL %s: %v", ProxyURL, err)
+		} else {
+			client.Transport = &http.Transport{
+				Proxy: http.ProxyURL(proxyURL),
+			}
+			log.Printf("已配置代理: %s", ProxyURL)
+		}
+		return client
+	}
+	
+	// 如果没有设置代理，检查环境变量
+	httpProxy := os.Getenv("HTTP_PROXY")
+	httpsProxy := os.Getenv("HTTPS_PROXY")
+	
+	// 如果没有设置HTTPS代理，尝试使用HTTP代理
+	if httpsProxy == "" {
+		httpsProxy = httpProxy
+	}
+	
+	// 如果没有设置HTTP代理，尝试使用小写的环境变量
+	if httpProxy == "" {
+		httpProxy = os.Getenv("http_proxy")
+	}
+	if httpsProxy == "" {
+		httpsProxy = os.Getenv("https_proxy")
+	}
+	
+	// 如果设置了代理，配置代理
+	if httpsProxy != "" {
+		proxyURL, err := url.Parse(httpsProxy)
+		if err != nil {
+			log.Printf("警告: 无法解析代理URL %s: %v", httpsProxy, err)
+		} else {
+			client.Transport = &http.Transport{
+				Proxy: http.ProxyURL(proxyURL),
+			}
+			log.Printf("已配置代理: %s", httpsProxy)
+		}
+	} else {
+		log.Println("未配置代理")
+	}
+	
+	return client
 }
 
 // getTokenFromWeb 从Web获取token
-func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
+func getTokenFromWeb(config *oauth2.Config, client *http.Client) *oauth2.Token {
 	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
 	fmt.Printf("在浏览器中打开以下链接进行授权: \n%v\n", authURL)
 
@@ -69,7 +167,9 @@ func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
 		log.Fatalf("无法读取授权码: %v", err)
 	}
 
-	tok, err := config.Exchange(context.TODO(), authCode)
+	// 使用配置了代理的客户端进行token交换
+	ctx := context.WithValue(context.TODO(), oauth2.HTTPClient, client)
+	tok, err := config.Exchange(ctx, authCode)
 	if err != nil {
 		log.Fatalf("无法获取token: %v", err)
 	}
@@ -86,6 +186,25 @@ func tokenFromFile(file string) (*oauth2.Token, error) {
 	tok := &oauth2.Token{}
 	err = json.NewDecoder(f).Decode(tok)
 	return tok, err
+}
+
+// isTokenValid 检查token是否有效
+func isTokenValid(token *oauth2.Token) bool {
+	if token == nil {
+		return false
+	}
+	
+	// 检查token是否过期
+	if token.Expiry.Before(time.Now()) {
+		return false
+	}
+	
+	// 检查是否有访问令牌
+	if token.AccessToken == "" {
+		return false
+	}
+	
+	return true
 }
 
 // saveToken 保存token到文件
@@ -132,8 +251,11 @@ func (gs *GmailService) GetUnreadEmails() ([]*EmailMessage, error) {
 func (gs *GmailService) SendEmail(to, subject, body string) error {
 	var message gmail.Message
 
+	// 对邮件标题进行UTF-8编码处理
+	encodedSubject := encodeSubject(subject)
+	
 	emailTo := "To: " + to + "\r\n"
-	emailSubject := "Subject: " + subject + "\r\n"
+	emailSubject := "Subject: " + encodedSubject + "\r\n"
 	mime := "MIME-version: 1.0;\nContent-Type: text/html; charset=\"UTF-8\";\r\n\r\n"
 	msg := []byte(emailTo + emailSubject + mime + "\r\n" + body)
 
@@ -145,6 +267,25 @@ func (gs *GmailService) SendEmail(to, subject, body string) error {
 	}
 
 	return nil
+}
+
+// encodeSubject 编码邮件标题
+func encodeSubject(subject string) string {
+	// 检查是否包含非ASCII字符
+	hasNonASCII := false
+	for _, r := range subject {
+		if r > 127 {
+			hasNonASCII = true
+			break
+		}
+	}
+	
+	if !hasNonASCII {
+		return subject
+	}
+	
+	// 使用UTF-8编码
+	return "=?UTF-8?B?" + base64.StdEncoding.EncodeToString([]byte(subject)) + "?="
 }
 
 // MarkAsRead 标记邮件为已读

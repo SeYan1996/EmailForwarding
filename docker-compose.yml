@@ -1,0 +1,28 @@
+
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: email_forwarding_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root123456
+      MYSQL_DATABASE: email_forwarding
+      MYSQL_USER: email_user
+      MYSQL_PASSWORD: email_pass123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d
+    command: --default-authentication-plugin=mysql_native_password
+    networks:
+      - email_network
+
+volumes:
+  mysql_data:
+    driver: local
+
+networks:
+  email_network:
+    driver: bridge 

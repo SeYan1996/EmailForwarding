@@ -1,0 +1,32 @@
+# 敏感文件
+credentials.json
+token.json
+.env
+
+# 构建文件
+email-forwarding.exe
+*.exe
+
+# 日志文件
+*.log
+
+# IDE文件
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.tmp
+*.temp
+
+# 数据库文件
+*.db
+*.sqlite
+
+# Docker数据
+docker/mysql/data/ 
