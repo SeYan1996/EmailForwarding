@@ -48,7 +48,7 @@ func NewGmailService(credentialsFile, tokenFile, userEmail string) (*GmailServic
 	}
 
 	// 解析OAuth 2.0配置
-	config, err := google.ConfigFromJSON(b, gmail.GmailReadonlyScope, gmail.GmailSendScope)
+	config, err := google.ConfigFromJSON(b, gmail.GmailReadonlyScope, gmail.GmailSendScope, gmail.GmailModifyScope)
 	if err != nil {
 		return nil, fmt.Errorf("无法解析OAuth 2.0配置: %v\n请确保下载的是OAuth 2.0客户端ID，而不是API密钥", err)
 	}
@@ -218,33 +218,137 @@ func saveToken(path string, token *oauth2.Token) {
 	json.NewEncoder(f).Encode(token)
 }
 
-// GetUnreadEmails 获取未读邮件
+// GetUnreadEmails 获取未读邮件（分批处理）
 func (gs *GmailService) GetUnreadEmails() ([]*EmailMessage, error) {
-	query := "is:unread"
+	// 使用分批处理，确保处理完所有邮件
+	// 每批50封，最多10批（总共500封）
+	return gs.GetUnreadEmailsBatch(50, 10)
+}
+
+// GetUnreadEmailsWithLimit 获取指定数量的未读邮件
+func (gs *GmailService) GetUnreadEmailsWithLimit(maxResults int64) ([]*EmailMessage, error) {
+	if maxResults <= 0 {
+		maxResults = 50 // 默认限制
+	}
+	if maxResults > 500 {
+		maxResults = 500 // 最大限制
+	}
+
+	query := "is:unread -in:trash -in:spam"
 	
-	req := gs.service.Users.Messages.List("me").Q(query)
+	req := gs.service.Users.Messages.List("me").Q(query).MaxResults(maxResults)
 	
 	r, err := req.Do()
 	if err != nil {
 		return nil, fmt.Errorf("无法获取邮件列表: %v", err)
 	}
 
+	log.Printf("获取到 %d 封未读邮件（最大限制: %d）", len(r.Messages), maxResults)
+
 	var emails []*EmailMessage
 	
+	// 使用goroutine批量处理邮件详情获取
+	emailChan := make(chan *EmailMessage, len(r.Messages))
+	errorChan := make(chan error, len(r.Messages))
+	
+	// 限制并发数量，避免API调用过于频繁
+	semaphore := make(chan struct{}, 10) // 最多10个并发
+	
 	for _, m := range r.Messages {
-		msg, err := gs.service.Users.Messages.Get("me", m.Id).Do()
-		if err != nil {
-			log.Printf("无法获取邮件详情 %s: %v", m.Id, err)
-			continue
-		}
+		go func(messageID string) {
+			semaphore <- struct{}{} // 获取信号量
+			defer func() { <-semaphore }() // 释放信号量
+			
+			msg, err := gs.service.Users.Messages.Get("me", messageID).Do()
+			if err != nil {
+				log.Printf("无法获取邮件详情 %s: %v", messageID, err)
+				errorChan <- err
+				return
+			}
 
-		email := parseEmailMessage(msg)
-		if email != nil {
+			email := parseEmailMessage(msg)
+			if email != nil {
+				emailChan <- email
+			} else {
+				errorChan <- fmt.Errorf("解析邮件失败: %s", messageID)
+			}
+		}(m.Id)
+	}
+
+	// 收集结果
+	for i := 0; i < len(r.Messages); i++ {
+		select {
+		case email := <-emailChan:
 			emails = append(emails, email)
+		case err := <-errorChan:
+			log.Printf("处理邮件时出错: %v", err)
 		}
 	}
 
+	log.Printf("成功处理 %d 封邮件", len(emails))
 	return emails, nil
+}
+
+// GetUnreadEmailsBatch 分批获取所有未读邮件
+func (gs *GmailService) GetUnreadEmailsBatch(batchSize int64, maxBatches int) ([]*EmailMessage, error) {
+	if batchSize <= 0 {
+			batchSize = 50
+	}
+	if maxBatches <= 0 {
+			maxBatches = 10
+	}
+	var allEmails []*EmailMessage
+	pageToken := ""
+	batchCount := 0
+	seenIDs := make(map[string]bool) // 用于去重
+
+	for batchCount < maxBatches {
+			query := "is:unread -in:trash -in:spam"
+			req := gs.service.Users.Messages.List("me").Q(query).MaxResults(batchSize).IncludeSpamTrash(false)
+			
+			if pageToken != "" {
+					req = req.PageToken(pageToken)
+			}
+
+			r, err := req.Do()
+			if err != nil {
+					return allEmails, fmt.Errorf("failed to list batch %d: %v", batchCount+1, err)
+			}
+
+			log.Printf("Processing batch %d: %d messages", batchCount+1, len(r.Messages))
+
+			// 批量获取邮件详情（可改用 goroutine 并发，控制并发数）
+			for _, m := range r.Messages {
+					if seenIDs[m.Id] {
+							continue // 跳过已处理的邮件
+					}
+					seenIDs[m.Id] = true
+
+					msg, err := gs.service.Users.Messages.Get("me", m.Id).Format("full").Do()
+					if err != nil {
+							log.Printf("Failed to get message %s (will retry): %v", m.Id, err)
+							// 可加入重试逻辑
+							continue
+					}
+
+					if email := parseEmailMessage(msg); email != nil {
+							allEmails = append(allEmails, email)
+					}
+			}
+
+			if r.NextPageToken == "" {
+					break
+			}
+
+			pageToken = r.NextPageToken
+			batchCount++
+			time.Sleep(50 * time.Millisecond) // 更短的间隔
+	}
+
+	if batchCount >= maxBatches {
+			log.Printf("Stopped after reaching max batches (%d), total emails: %d", maxBatches, len(allEmails))
+	}
+	return allEmails, nil
 }
 
 // SendEmail 发送邮件

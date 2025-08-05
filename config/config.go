@@ -33,13 +33,17 @@ type ServerConfig struct {
 }
 
 type AppConfig struct {
-	CheckInterval time.Duration
-	Keywords      []string
+	CheckInterval    time.Duration
+	Keywords         []string
+	MaxEmailsPerBatch int64 // 每批获取的最大邮件数量
+	MaxBatches       int    // 最大批次数
 }
 
 func LoadConfig() *Config {
 	port, _ := strconv.Atoi(getEnv("DB_PORT", "3306"))
 	checkInterval, _ := time.ParseDuration(getEnv("CHECK_INTERVAL", "5m"))
+	maxEmails, _ := strconv.ParseInt(getEnv("MAX_EMAILS_PER_BATCH", "50"), 10, 64)
+	maxBatches, _ := strconv.Atoi(getEnv("MAX_BATCHES", "10"))
 
 	return &Config{
 		Database: DatabaseConfig{
@@ -59,8 +63,10 @@ func LoadConfig() *Config {
 			Mode: getEnv("GIN_MODE", "debug"),
 		},
 		App: AppConfig{
-			CheckInterval: checkInterval,
-			Keywords:      []string{"紧急", "重要", "客户", "投诉"}, // 可配置的关键字
+			CheckInterval:    checkInterval,
+			Keywords:         []string{"紧急", "重要", "客户", "投诉"}, // 可配置的关键字
+			MaxEmailsPerBatch: maxEmails,
+			MaxBatches:       maxBatches,
 		},
 	}
 }

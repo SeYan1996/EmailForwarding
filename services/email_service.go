@@ -25,7 +25,7 @@ func NewEmailService(gmailService *GmailService) *EmailService {
 func (es *EmailService) ProcessEmails() error {
 	logger := utils.GetLogger()
 	
-	// 获取未读邮件
+	// 获取未读邮件（使用配置的数量限制）
 	emails, err := es.gmailService.GetUnreadEmails()
 	if err != nil {
 		return fmt.Errorf("获取未读邮件失败: %v", err)
